@@ -1,0 +1,10 @@
+gymnasium>=0.29
+numpy>=1.24
+pandas>=2.1
+requests>=2.31
+pydantic>=2.5
+pyyaml>=6.0
+matplotlib>=3.8
+stable-baselines3>=2.3.0
+torch>=2.2
+tqdm>=4.66

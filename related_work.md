@@ -1,0 +1,5 @@
+- https://github.com/simondelarue/Deep-Reinforcement-Learning-for-MicroGrids
+- https://github.com/christiantae/rl-microgrid
+- https://github.com/utkarshapets/microgrid-RL
+- https://github.com/upb-lea/openmodelica-microgrid-gym
+- https://github.com/ChongAih/Energy-Management-and-Economic-Evaluation-of-Grid-Conected-Microgrid-Operation

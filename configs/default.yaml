@@ -1,0 +1,47 @@
+time:
+  step_hours: 1
+  episode_days: 120
+
+location:
+  lat: -1.2921
+  lon: 36.8219
+  tz: Africa/Nairobi
+
+solar:
+  panel_area_m2: 50.0
+  efficiency: 0.18
+  temp_coeff_pct_per_C: -0.0035
+  derate_soiling: 0.95
+
+battery:
+  capacity_kwh: 80.0
+  max_charge_kw: 20.0
+  max_discharge_kw: 20.0
+  roundtrip_efficiency: 0.92
+  soc_init_pct: 0.5
+  soc_min_pct: 0.15
+  soc_max_pct: 0.95
+
+diesel:
+  rated_kw: 30.0
+  kwh_per_liter: 3.5
+  min_loading_pct: 0.3
+  fuel_tank_liters: 200.0
+  fuel_init_pct: 1.0
+  fuel_cost_per_liter: 1.5
+  co2_kg_per_liter: 2.68
+
+load:
+  base_kwh_per_hour: 1.6
+  peak_multiplier_evening: 2.0
+  weekend_multiplier: 1.15
+  noise_std_pct: 0.2
+
+reward:
+  blackout_penalty_per_kwh: 10.0
+  diesel_cost_weight: 1.0
+  battery_cycle_weight: 0.05
+  curtailment_weight: 0.2
+  keep_soc_in_band_bonus: 0.02
+
+seed: 0
