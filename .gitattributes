@@ -1,0 +1,15 @@
+* text=auto
+
+# Force LF for source & configs
+*.py   eol=lf
+*.txt  eol=lf
+*.md   eol=lf
+*.yml  eol=lf
+*.yaml eol=lf
+*.json eol=lf
+*.csv  eol=lf
+*.sh   eol=lf
+
+# Keep Windows endings where they matter
+*.bat  eol=crlf
+*.ps1  eol=crlf
