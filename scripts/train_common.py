@@ -18,7 +18,8 @@ def synthetic_load(hours: int, base_kwh: float, evening_mult: float, weekend_mul
 
 def build_env(cfg_path: str, lat: float, lon: float, days: int):
     cfg = yaml.safe_load(open(cfg_path, 'r'))
-    df_all = fetch_power_hourly(lat, lon, '2024-01-01', '2024-12-31')
+    tz = cfg.get("location", {}).get("tz", "UTC") # if no timezone found, fall back to UTC
+    df_all = fetch_power_hourly(lat, lon, '2024-01-01', '2024-12-31', tz=tz) # data localized before being used to train agent
     end_hours = days * 24
     df = df_all.iloc[:end_hours].copy()
     l = cfg['load']
