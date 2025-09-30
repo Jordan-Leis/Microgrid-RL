@@ -9,6 +9,7 @@ data/cache/
 data/raw/
 data/processed/
 outputs/
+results/
 runs/
 .ipynb_checkpoints/
 .DS_Store
