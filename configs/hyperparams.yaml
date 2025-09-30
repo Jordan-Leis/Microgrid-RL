@@ -1,0 +1,10 @@
+sac:
+  learning_rate: 0.0003
+  gamma: 0.99
+  batch_size: 256
+
+a2c:
+  learning_rate: 0.0007
+  gamma: 0.99
+  n_steps: 5
+  

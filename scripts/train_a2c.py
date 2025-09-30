@@ -1,4 +1,5 @@
 import argparse, os
+import yaml
 from stable_baselines3 import A2C
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -12,18 +13,32 @@ def main():
     ap.add_argument('--cfg', type=str, default='configs/default.yaml')
     ap.add_argument('--seed', type=int, default=0)
     ap.add_argument('--total_timesteps', type=int, default=500_000)
+    ap.add_argument('--save-path', type=str, default='outputs')
+    ap.add_argument('--csv-log', type=str, default='outputs/training.csv')
+    ap.add_argument('--vectorized', action='store_true')
+    ap.add_argument('--hyperparams', type=str, default='configs/hyperparams.yaml')
     args = ap.parse_args()
+
+    # load and use a2c hyperparameters
+    hp = yaml.safe_load(open(args.hyperparams))
+    lr = hp['a2c']['learning_rate']
+    gamma = hp['a2c']['gamma']
+    n_steps = hp['a2c']['n_steps']
 
     def make_env():
         env = build_env(args.cfg, args.lat, args.lon, args.days)
-        return Monitor(env)
+        env = Monitor(env, filename=args.csv_log)  # for CSV logging
+        return env
 
-    env = DummyVecEnv([make_env])
-    model = A2C('MlpPolicy', env, verbose=1, seed=args.seed)
-    os.makedirs('outputs', exist_ok=True)
+    env = DummyVecEnv([make_env]) if args.vectorized else make_env()
+    model = A2C('MlpPolicy', env, verbose=1, seed=args.seed,
+            learning_rate=lr, gamma=gamma, n_steps=n_steps)
+    
+    os.makedirs(args.save_path, exist_ok=True)
+    model_file = os.path.join(args.save_path, 'a2c_microgrid.zip')
     model.learn(total_timesteps=args.total_timesteps)
-    model.save('outputs/a2c_microgrid.zip')
-    print('Saved model → outputs/a2c_microgrid.zip')
+    model.save(model_file)
+    print(f'Saved model → {model_file}')
 
 if __name__ == '__main__':
     main()
