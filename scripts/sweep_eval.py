@@ -23,7 +23,7 @@ for algo in algorithms:
                 print(f'Running {algo} | seed {seed} | year {year} | load {load}')
 
                 def make_env():
-                    return build_env('configs/default.yaml', lat=-1.2921, lon=36.8219, days=30)
+                    return build_env('configs/default.yaml', lat=-1.2921, lon=36.8219, days=30, year=year, load_scenario=load, seed=seed)
                 env = DummyVecEnv([make_env])
 
                 model_path = f'outputs/{algo}_microgrid'
@@ -40,7 +40,7 @@ for algo in algorithms:
                     ep_reward, ep_unmet, ep_diesel, ep_curtail, ep_cycles = 0, 0, 0, 0, 0
 
                     while not done:
-                        action, _ = model.predict(obs, deterministic=True)
+                        action, _ = model.predict(obs, deterministic=False)
                         obs, r, done, info = env.step(action)
                         r = r[0]
                         done = done[0]
@@ -82,7 +82,7 @@ print(f'Saved summary → {summary_csv}')
 
 
 os.makedirs('results/plots', exist_ok=True)
-metrics_to_plot = ['reward_mean', 'unmet_kwh_mean', 'diesel_liters_mean']
+metrics_to_plot = ['reward_mean', 'unmet_kwh_mean', 'diesel_liters_mean', 'curtailment_mean', 'cycles_mean']
 
 for metric in metrics_to_plot:
     plt.figure()
