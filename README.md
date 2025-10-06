@@ -9,3 +9,5 @@ pip install --upgrade pip && pip install -r requirements.txt
 python scripts/download_nasa_power.py --lat -1.2921 --lon 36.8219 --start 2024-01-01 --end 2024-12-31 --out data/raw/nairobi_2024.csv
 python scripts/train_sac.py --lat -1.2921 --lon 36.8219 --days 180
 ```
+## Contributors
+Cilo Zhou
