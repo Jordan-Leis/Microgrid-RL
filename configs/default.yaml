@@ -45,3 +45,11 @@ reward:
   keep_soc_in_band_bonus: 0.02
 
 seed: 0
+
+inverter_max_kw: 50
+inverter_efficiency_curve:
+  - {power: 0, efficiency: 0.9}
+  - {power: 25, efficiency: 0.95}
+  - {power: 50, efficiency: 0.93}
+
+degradation_weight: 0.0 #think about later
