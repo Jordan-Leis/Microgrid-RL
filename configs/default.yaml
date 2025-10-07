@@ -52,4 +52,4 @@ inverter_efficiency_curve:
   - {power: 20, efficiency: 0.96}
   - {power: 40, efficiency: 0.94}
 
-degradation_weight: 0.001 #maybe need modify?
+degradation_weight: 0.001 # maybe modify
