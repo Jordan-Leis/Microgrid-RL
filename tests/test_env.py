@@ -56,3 +56,14 @@ def test_temp_dependent_efficiency():
     env.df.loc[env._t, "T2M"] = 35.0
     obs, _, _, _, info_hot = env.step([1.0, 0.0])
     assert info_hot["e_batt"] != info_cold["e_batt"]
+
+def test_rainflow_cycle_counter():
+    env = make_env()
+    obs, _ = env.reset()
+    done = False
+    while not done:
+        action = env.action_space.sample()
+        obs, r, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert "equiv_full_cycles" in info
+    assert isinstance(info["equiv_full_cycles"], (float, type(None)))

@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
+import rainflow
 
 
 class MicrogridEnv(gym.Env):
@@ -145,6 +146,7 @@ class MicrogridEnv(gym.Env):
         self._soc = float(self.cfg["battery"]["soc_init_pct"])
         self._fuel = float(self.cfg["diesel"]["fuel_init_pct"])
         self.battery_cycle_kwh = 0.0
+        self._soc_history = [self._soc]
         return self._obs(), {}
 
     def step(self, action):
@@ -172,6 +174,7 @@ class MicrogridEnv(gym.Env):
         temp_C = float(self.df.iloc[self._t]["T2M"])
 
         # ------------------ Temperature-dependent battery efficiency ------------------ #
+        # Dependent on POWER T2M values
         eta_temp = np.sqrt(self.batt_eta_rt) * (1.0 + self.temp_coeff * (temp_C - 25.0)/100)
         self.eta_ch = eta_temp
         self.eta_dis = eta_temp
@@ -212,6 +215,7 @@ class MicrogridEnv(gym.Env):
 
         # ------------------ Update SOC ------------------ #
         self._soc = float(np.clip(soc_kwh / self.batt_cap, self.soc_min, self.soc_max))
+        self._soc_history.append(self._soc)
 
         # ------------------ Fuel bookkeeping --------------- #
         # Consume fuel based on e_diesel produced
@@ -261,6 +265,21 @@ class MicrogridEnv(gym.Env):
             "fuel": self._fuel,
             "battery_cycle_kwh": self.battery_cycle_kwh,
         }
+
+        # ------------------ Equivalent full cycles ------------------ #
+        if terminated or truncated:
+        # Compute equivalent full cycles for battery using rainflow method per episode end
+            try:
+                import rainflow
+                cycles = rainflow.count_cycles(self._soc_history)
+                equiv_full_cycles = sum(abs(c) for c in cycles)
+                self.equiv_full_cycles = equiv_full_cycles
+                print(f"Episode ended - Equivalent full cycles: {equiv_full_cycles:.3f}")
+            except Exception as error:
+                print(f"Rainflow analysis failed: {error}")
+                equiv_full_cycles = None
+        # Rainflow-based equivalent full battery cycles per episode
+        info["equiv_full_cycles"] = getattr(self, "equiv_full_cycles", None)
 
         return self._obs(), float(r), terminated, truncated, info
 
