@@ -67,3 +67,13 @@ def test_rainflow_cycle_counter():
         done = terminated or truncated
     assert "equiv_full_cycles" in info
     assert isinstance(info["equiv_full_cycles"], (float, type(None)))
+
+def test_rainflow_cycle_counter():
+    env = make_env()
+    obs, - = env.reset()
+    done = False
+    while not done:
+        action = env.action_space.sample()
+        obs, r, terminated, truncated, info = env.step(action)
+        done = terminated or truncated
+    assert "equiv_full_cycles" in info assert isinstance(infol"equiv_full_cycles"], (float, type(None)))
