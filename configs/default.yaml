@@ -30,6 +30,22 @@ diesel:
   fuel_init_pct: 1.0
   fuel_cost_per_liter: 1.5
   co2_kg_per_liter: 2.68
+  # Efficiency curve: [load_fraction, liters_per_kwh] - TODO: tweak with numbers for chosen generator?
+  sfc_liters_per_kwh_curve: [[0.3, 0.33], [0.5, 0.30], [0.7, 0.28], [1.0, 0.26]]
+  # Startup penalty
+  startup_liters_penalty: 0.5
+  # Minimum on/off times
+  min_on_hours: 2.0
+  min_off_hours: 1.0
+  # Auto-refuel configuration
+  auto_refuel: true
+  refuel_threshold_pct: 0.2  # Refuel threshold
+  refuel_target_pct: 0.95    # Refuel target
+  refuel_cost_per_liter: 1.5
+  refuel_delivery_fee: 25.0   # Delivery fee per refuel event?
+  # Maintenance budget
+  maintenance_hours_budget_per_week: 5.0  # Hours of operation allowed per week
+  maintenance_cost_per_hour_over_budget: 10.0  
 
 load:
   base_kwh_per_hour: 1.6
@@ -43,5 +59,7 @@ reward:
   battery_cycle_weight: 0.05
   curtailment_weight: 0.2
   keep_soc_in_band_bonus: 0.02
+  generator_start_penalty: 5.0  # Penalty per generator start
+  generator_operation_hour_penalty: 0.1  # Penalty per hour of generator operation
 
 seed: 0

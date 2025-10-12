@@ -92,6 +92,9 @@ class MicrogridEnv(gym.Env):
         self.refuel_target_pct = float(d.get("refuel_target_pct", 1.0))        # top up to this level
         self.refuel_cost_per_liter = float(d.get("refuel_cost_per_liter", self.fuel_cost))
         self.refuel_delivery_fee = float(d.get("refuel_delivery_fee", 0.0))
+        # Maintenance budget
+        self.maintenance_hours_budget_per_week = float(d.get("maintenance_hours_budget_per_week", 0.0))
+        self.maintenance_cost_per_hour_over_budget = float(d.get("maintenance_cost_per_hour_over_budget", 0.0))
 
         # PV
         self.panel_area = float(s["panel_area_m2"])
@@ -120,6 +123,8 @@ class MicrogridEnv(gym.Env):
         self._on_steps = 0
         # Pretend it's been off long enough so we can start immediately unless min_off > 0
         self._off_steps = 0
+        # Track maintenance hours for budget enforcement
+        self._total_operation_hours = 0.0
 
     # --------------------------------------------------------------------- #
     # Helpers
@@ -166,6 +171,8 @@ class MicrogridEnv(gym.Env):
         self._on_steps = 0
         # Initialize off counter to at least min_off to allow start at t=0
         self._off_steps = self.min_off_steps
+        # Reset maintenance tracking
+        self._total_operation_hours = 0.0
         return self._obs(), {}
 
     def step(self, action):
@@ -244,6 +251,10 @@ class MicrogridEnv(gym.Env):
         else:
             e_diesel = e_diesel_req if self._genset_on else 0.0
             liters_used = liters_start + (e_diesel * lpkwh if self._genset_on else 0.0)
+        
+        # Track operation hours for maintenance budget
+        if self._genset_on:
+            self._total_operation_hours += self.dt
 
         # ------------------ PV generation ------------------ #
         # NASA POWER hourly ALLSKY_SFC_SW_DWN is kWh/m^2 over the hour.
@@ -297,6 +308,15 @@ class MicrogridEnv(gym.Env):
 
         self._fuel = fuel_abs / self.fuel_tank_l
 
+        # ------------------ Maintenance cost calculation ---- #
+        maintenance_cost = 0.0
+        if self.maintenance_hours_budget_per_week > 0.0:
+            # Calculate current week's budget based on elapsed time
+            elapsed_weeks = (self._t * self.dt) / (7.0 * 24.0)  # Convert hours to weeks
+            budget_hours = elapsed_weeks * self.maintenance_hours_budget_per_week
+            over_budget_hours = max(0.0, self._total_operation_hours - budget_hours)
+            maintenance_cost = over_budget_hours * self.maintenance_cost_per_hour_over_budget
+
         # ------------------ Power balance ------------------ #
         supply = e_solar + max(0.0, e_batt_ac) + e_diesel
         sinks = e_load + max(0.0, -e_batt_ac)
@@ -311,8 +331,16 @@ class MicrogridEnv(gym.Env):
         # Charge refuel cost similarly
         if refuel_cost > 0:
             r -= float(self.rw["diesel_cost_weight"]) * refuel_cost
+        # Charge maintenance cost
+        if maintenance_cost > 0:
+            r -= float(self.rw["diesel_cost_weight"]) * maintenance_cost
         r -= float(self.rw["battery_cycle_weight"]) * abs(e_batt_ac)
         r -= float(self.rw["curtailment_weight"]) * curtailment
+        # Generator operation penalties
+        if started:
+            r -= float(self.rw["generator_start_penalty"])
+        if self._genset_on:
+            r -= float(self.rw["generator_operation_hour_penalty"]) * self.dt
         # Small shaping bonus for keeping SOC away from hard limits
         if self.soc_min + 0.05 <= self._soc <= self.soc_max - 0.05:
             r += float(self.rw["keep_soc_in_band_bonus"])
@@ -350,6 +378,7 @@ class MicrogridEnv(gym.Env):
             "startup_liters": float(liters_start),
             "refueled_liters": float(refueled_liters),
             "refuel_cost": float(refuel_cost),
+            "maintenance_cost": float(maintenance_cost),
         }
 
         return self._obs(), float(r), terminated, truncated, info
