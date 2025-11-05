@@ -5,7 +5,6 @@ from pathlib import Path
 from typing import Union
 
 
-
 def get_load_profiles(path=None):
     """
     Load household and commercial load profiles from CSV.
@@ -19,14 +18,17 @@ def get_load_profiles(path=None):
     df.columns = df.columns.str.strip()
     return df
 
+
 def scale_household_loads(hourly_series, num_households=1):
     """Scale load profile by specified number of households/buildings."""
     return hourly_series * num_households
+
 
 def apply_weekday_weekend_pattern(load_series, is_weekend=False, weekday_factor=1.0, weekend_factor=1.2):
     """Apply different scaling for weekdays and weekends."""
     factor = weekend_factor if is_weekend else weekday_factor
     return load_series * factor
+
 
 def add_random_noise(load_series, noise_std=0.05, seed=None, rng=None):
     """
@@ -40,10 +42,12 @@ def add_random_noise(load_series, noise_std=0.05, seed=None, rng=None):
     noisy_load = np.clip(noisy_load, 0, None)  # Ensure non-negative loads
     return noisy_load
 
+
 def synthetic_daily_temp(day_of_year, t_mean=27.0, amp=3.0):
     """Simple sinusoidal annual temperature model (°C)."""
     phase_shift = 80
     return t_mean + amp * np.sin(2*np.pi*(day_of_year - phase_shift)/365)
+
 
 def weather_scaler_hourly(T_day, kind="household"):
     """Cooling-driven hourly multiplier based on daily temperature."""
@@ -64,6 +68,7 @@ def weather_scaler_hourly(T_day, kind="household"):
         ])
         beta = 0.012
     return 1.0 + beta * cdd * hour_weights
+
 
 def sample_day_with_weather(b, day_of_year, kind="household", rng=np.random.default_rng()):
     """
