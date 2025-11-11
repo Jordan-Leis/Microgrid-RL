@@ -84,7 +84,7 @@ def fetch_power_hourly(
     lon: float,
     start: str,
     end: str,
-    parameters: str = "ALLSKY_SFC_SW_DWN,T2M",
+    parameters: str = "ALLSKY_SFC_SW_DWN,CLRSKY_SFC_SW_DWN,T2M",
     tz: Optional[str] = None,
     timeout: int = 60,
 ) -> pd.DataFrame:
