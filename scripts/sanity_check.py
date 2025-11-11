@@ -1,6 +1,7 @@
 import argparse
 import csv
 import os
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Tuple
 
@@ -8,6 +9,7 @@ import numpy as np
 from stable_baselines3 import A2C, SAC
 from stable_baselines3.common.monitor import Monitor
 from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import BaseCallback
 
 from scripts.train_common import build_env
 
@@ -19,7 +21,7 @@ class EpisodeStats:
 	liters_sum: float
 
 
-def evaluate_episode(model, cfg_path: str, lat: float, lon: float, days: int, seed: int, save_trajectory_path: str | None = None) -> EpisodeStats:
+def evaluate_episode(model, cfg_path: str, lat: float, lon: float, days: int, seed: int, save_trajectory_path: str | None = None, progress_sec: float | None = None) -> EpisodeStats:
 	"""
 	Runs a single evaluation episode with the trained model on a fresh env.
 	Optionally saves a per-step trajectory CSV.
@@ -47,14 +49,24 @@ def evaluate_episode(model, cfg_path: str, lat: float, lon: float, days: int, se
 		"e_diesel",
 	]
 
-	done = False
+	# Gymnasium returns (terminated, truncated). Stop when either is True.
+	terminated = False
+	truncated = False
 	t = 0
-	while not done:
+	last_beat = time.time()
+	while not (terminated or truncated):
 		action, _ = model.predict(obs, deterministic=True)
-		obs, r, done, _, info = env.step(action)
+		obs, r, terminated, truncated, info = env.step(action)
 		r_total += float(r)
 		unmet_total += float(info.get("unmet_kwh", 0.0))
 		liters_total += float(info.get("liters_used", 0.0))
+
+		# Optional evaluation heartbeat
+		if progress_sec is not None:
+			now = time.time()
+			if now - last_beat >= progress_sec:
+				print(f"[EVAL] t={t}  reward_sum={r_total:.2f}  unmet_kWh={unmet_total:.2f}  diesel_L={liters_total:.2f}")
+				last_beat = now
 
 		if save_trajectory_path is not None:
 			row = [
@@ -84,6 +96,49 @@ def evaluate_episode(model, cfg_path: str, lat: float, lon: float, days: int, se
 	return EpisodeStats(reward_sum=r_total, unmet_kwh_sum=unmet_total, liters_sum=liters_total)
 
 
+class ProgressCallback(BaseCallback):
+	"""
+	Simple console progress: prints percent, speed (steps/s), elapsed, and ETA every N seconds.
+	"""
+	def __init__(self, total_timesteps: int, label: str, print_every_sec: float = 30.0):
+		super().__init__()
+		self.total_timesteps = int(total_timesteps)
+		self.label = label
+		self.print_every_sec = float(print_every_sec)
+		self._t0 = None
+		self._last_print = None
+		self._t0_steps = 0
+
+	def _on_training_start(self) -> None:
+		self._t0 = time.time()
+		self._last_print = self._t0
+		self._t0_steps = int(self.num_timesteps)
+		print(f"[{self.label}] Training started...")
+
+	def _on_step(self) -> bool:
+		now = time.time()
+		if now - self._last_print >= self.print_every_sec:
+			done = min(int(self.num_timesteps), self.total_timesteps)
+			elapsed = now - self._t0
+			delta_steps = max(1, done - self._t0_steps)
+			steps_per_sec = delta_steps / max(1e-6, elapsed)
+			pct = 100.0 * done / max(1, self.total_timesteps)
+			remain_steps = max(0, self.total_timesteps - done)
+			eta_sec = remain_steps / max(1e-6, steps_per_sec)
+			def fmt(sec: float) -> str:
+				m = int(sec // 60); s = int(sec % 60)
+				h = m // 60; m = m % 60
+				return f"{h:02d}:{m:02d}:{s:02d}"
+			print(f"[{self.label}] {pct:6.2f}%  {done}/{self.total_timesteps} steps  "
+			      f"{steps_per_sec:6.2f} steps/s  elapsed {fmt(elapsed)}  ETA {fmt(eta_sec)}")
+			self._last_print = now
+		return True
+
+	def _on_training_end(self) -> None:
+		total_elapsed = time.time() - self._t0 if self._t0 is not None else 0.0
+		print(f"[{self.label}] Training finished in {total_elapsed:.1f}s")
+
+
 def train_once(algo: str, seed: int, cfg_path: str, lat: float, lon: float, days: int, total_timesteps: int):
 	"""
 	Trains either A2C or SAC for a small budget on a single DummyVecEnv.
@@ -101,7 +156,8 @@ def train_once(algo: str, seed: int, cfg_path: str, lat: float, lon: float, days
 	else:
 		raise ValueError(f"Unknown algo: {algo}")
 
-	model.learn(total_timesteps=total_timesteps)
+	cb = ProgressCallback(total_timesteps=total_timesteps, label=f"{algo.upper()} seed={seed}")
+	model.learn(total_timesteps=total_timesteps, callback=cb)
 	return model
 
 
@@ -144,6 +200,7 @@ def main():
 	ap.add_argument("--steps", type=int, default=20_000)
 	ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
 	ap.add_argument("--out_dir", type=str, default="outputs/sanity")
+	ap.add_argument("--progress_sec", type=float, default=30.0, help="Seconds between progress prints during training")
 	args = ap.parse_args()
 
 	os.makedirs(args.out_dir, exist_ok=True)
@@ -154,6 +211,7 @@ def main():
 	for algo in algos:
 		for i, seed in enumerate(args.seeds):
 			print(f"[{algo.upper()}] Training seed={seed} for {args.steps} steps...")
+			# Progress frequency is configured within the callback; ensure it uses the CLI arg
 			model = train_once(
 				algo=algo,
 				seed=seed,
@@ -168,6 +226,8 @@ def main():
 			trajectory_path = None
 			if i == 0:
 				trajectory_path = os.path.join(args.out_dir, f"{algo}_seed{seed}_trajectory.csv")
+			print(f"[{algo.upper()} seed={seed}] Evaluating episode...")
+			_eval_t0 = time.time()
 			stats = evaluate_episode(
 				model=model,
 				cfg_path=args.cfg,
@@ -176,7 +236,9 @@ def main():
 				days=args.days,
 				seed=seed,
 				save_trajectory_path=trajectory_path,
+				progress_sec=args.progress_sec,
 			)
+			print(f"[{algo.upper()} seed={seed}] Evaluation finished in {time.time()-_eval_t0:.1f}s")
 			all_results[algo].append(stats)
 			emit_sanity_warnings(stats, f"{algo.upper()} seed {seed}")
 
