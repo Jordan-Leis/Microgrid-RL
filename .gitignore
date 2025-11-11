@@ -13,3 +13,4 @@ runs/
 .ipynb_checkpoints/
 .DS_Store
 Thumbs.db
+wandb/
