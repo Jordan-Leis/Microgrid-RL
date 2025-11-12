@@ -5,7 +5,6 @@ import os
 
 def plot_metrics(log_path, save_dir=None):
     df = pd.read_csv(log_path)
-    numeric_cols = df.select_dtypes(include='number').columns.tolist()
 
     # Check if required metrics (reward and fuel) exist in CSV file
     required = ["reward", "fuel"]
@@ -16,10 +15,9 @@ def plot_metrics(log_path, save_dir=None):
     # Determine x-axis (timesteps)
     if "step" in df.columns: # if there is a step column
         x = df["step"]
-        x_title = "step"
     else:
         x = range(len(df)) # take number of rows
-        x_title = "Timesteps"
+    x_title = "Timesteps"
 
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
