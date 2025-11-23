@@ -63,3 +63,30 @@ reward:
   generator_operation_hour_penalty: 0.1  # Penalty per hour of generator operation
 
 seed: 0
+
+inverter_max_kw: 40
+inverter_efficiency_curve:
+  - {power: 0, efficiency: 0.9}
+  - {power: 20, efficiency: 0.96}
+  - {power: 40, efficiency: 0.94}
+
+degradation_weight: 0.001 # maybe modify
+load_scenarios:
+  rural_village_small:
+    num_households: 10
+    weekday_factor: 1.0
+    weekend_factor: 1.2
+    add_noise: true
+    noise_std: 0.05
+  clinic:
+    num_households: 1
+    weekday_factor: 1.1
+    weekend_factor: 0.8
+    add_noise: true
+    noise_std: 0.03
+  school:
+    num_households: 1
+    weekday_factor: 1.2
+    weekend_factor: 0.5
+    add_noise: true
+    noise_std: 0.04
