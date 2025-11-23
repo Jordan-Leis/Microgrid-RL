@@ -11,8 +11,8 @@ python scripts/train_sac.py --lat -1.2921 --lon 36.8219 --days 180
 ```
 
 ## Contributors
+- Yalda Nikookar
 - Julian Bauer-Kong
 - Cilo Zhou
 - Taha Subzwari
 - Siri Sujay
-
