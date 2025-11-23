@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
+import rainflow
 
 
 class MicrogridEnv(gym.Env):
@@ -60,6 +61,11 @@ class MicrogridEnv(gym.Env):
         d = self.cfg["diesel"]
         s = self.cfg["solar"]
 
+        # --- Inverter (from config) ---
+        self.inverter_max_kw = float(self.cfg["inverter_max_kw"])
+        self.inverter_eff_curve = self.cfg["inverter_efficiency_curve"]
+        self.degradation_weight = float(self.cfg.get("degradation_weight", 0.0))
+
         # Battery
         self.batt_cap = float(b["capacity_kwh"])
         self.batt_eta_rt = float(b["roundtrip_efficiency"])
@@ -78,6 +84,23 @@ class MicrogridEnv(gym.Env):
         self.fuel_tank_l = float(d["fuel_tank_liters"])
         self.fuel_cost = float(d["fuel_cost_per_liter"])
         self.co2_kg_per_l = float(d["co2_kg_per_liter"])
+        # Optional diesel advanced settings (backward compatible defaults)
+        # Efficiency vs load (specific fuel consumption curve): list of [load_frac, liters_per_kwh]
+        self.diesel_sfc_curve = d.get("sfc_liters_per_kwh_curve")  # e.g., [[0.3, 0.33], [0.5, 0.30], [1.0, 0.28]]
+        # Startup penalty in liters when transitioning OFF->ON
+        self.diesel_startup_liters = float(d.get("startup_liters_penalty", 0.0))
+        # Minimum on/off durations in hours
+        self.min_on_hours = float(d.get("min_on_hours", 0.0))
+        self.min_off_hours = float(d.get("min_off_hours", 0.0))
+        # Auto-refuel options
+        self.auto_refuel = bool(d.get("auto_refuel", False))
+        self.refuel_threshold_pct = float(d.get("refuel_threshold_pct", 0.0))  # trigger when fuel% < threshold
+        self.refuel_target_pct = float(d.get("refuel_target_pct", 1.0))        # top up to this level
+        self.refuel_cost_per_liter = float(d.get("refuel_cost_per_liter", self.fuel_cost))
+        self.refuel_delivery_fee = float(d.get("refuel_delivery_fee", 0.0))
+        # Maintenance budget
+        self.maintenance_hours_budget_per_week = float(d.get("maintenance_hours_budget_per_week", 0.0))
+        self.maintenance_cost_per_hour_over_budget = float(d.get("maintenance_cost_per_hour_over_budget", 0.0))
 
         # PV
         self.panel_area = float(s["panel_area_m2"])
@@ -93,11 +116,21 @@ class MicrogridEnv(gym.Env):
         self._episode_steps = int(
             self.cfg["time"]["episode_days"] * 24 / self.cfg["time"]["step_hours"]
         )
+        # Compute min on/off steps after dt is known
+        self.min_on_steps = int(round(self.min_on_hours / self.dt)) if self.min_on_hours > 0 else 0
+        self.min_off_steps = int(round(self.min_off_hours / self.dt)) if self.min_off_hours > 0 else 0
 
         # Runtime state
         self._t = 0               # current time index (position in data)
         self._soc = None          # state of charge [0..1]
         self._fuel = None         # fuel level [0..1]
+        # Genset state for min on/off and startup penalties
+        self._genset_on = False
+        self._on_steps = 0
+        # Pretend it's been off long enough so we can start immediately unless min_off > 0
+        self._off_steps = 0
+        # Track maintenance hours for budget enforcement
+        self._total_operation_hours = 0.0
 
     # --------------------------------------------------------------------- #
     # Helpers
@@ -139,6 +172,13 @@ class MicrogridEnv(gym.Env):
         self._t = 0
         self._soc = float(self.cfg["battery"]["soc_init_pct"])
         self._fuel = float(self.cfg["diesel"]["fuel_init_pct"])
+        # Reset genset state; allow immediate start if desired (honor min_off if configured)
+        self._genset_on = False
+        self._on_steps = 0
+        # Initialize off counter to at least min_off to allow start at t=0
+        self._off_steps = self.min_off_steps
+        # Reset maintenance tracking
+        self._total_operation_hours = 0.0
         return self._obs(), {}
 
     def step(self, action):
@@ -151,19 +191,89 @@ class MicrogridEnv(gym.Env):
         p_batt = a_batt * (self.batt_p_max_dis if a_batt >= 0 else self.batt_p_max_ch)
         e_batt_req = p_batt * self.dt  # requested AC-side energy (+discharge, -charge)
 
-        # ------------------ Diesel setpoint ---------------- #
-        p_diesel = a_diesel * self.diesel_kw_rated
-        if a_diesel > 0.0:
-            # Enforce minimum loading if running
-            p_diesel = max(p_diesel, self.diesel_kw_rated * self.diesel_min_frac)
-        e_diesel = p_diesel * self.dt  # kWh over the step
-        liters_used = e_diesel / self.diesel_kwh_per_l if e_diesel > 0 else 0.0
+        # ------------------ Diesel setpoint & fuel use ----- #
+        desired_on = a_diesel > 0.0
+        started = False
+        stopped = False
+        # Enforce min on/off gating
+        if self._genset_on:
+            if (not desired_on) and (self._on_steps >= self.min_on_steps):
+                self._genset_on = False
+                self._on_steps = 0
+                stopped = True
+            else:
+                # Stay on
+                pass
+        else:
+            if desired_on and (self._off_steps >= self.min_off_steps):
+                # Start allowed
+                if self.diesel_startup_liters <= self._fuel * self.fuel_tank_l:
+                    self._genset_on = True
+                    self._off_steps = 0
+                    started = True
+                else:
+                    # Not enough fuel to even start
+                    desired_on = False
+                    self._genset_on = False
+
+        # Determine setpoint when ON
+        if self._genset_on:
+            # Enforce minimum loading
+            frac = max(a_diesel, self.diesel_min_frac)
+            p_diesel = frac * self.diesel_kw_rated
+        else:
+            p_diesel = 0.0
+            frac = 0.0
+
+        # Compute diesel energy produced and liters used, possibly fuel-limited
+        e_diesel_req = p_diesel * self.dt  # requested kWh over the step
+        liters_available = self._fuel * self.fuel_tank_l
+
+        # Specific fuel consumption (liters per kWh)
+        def _diesel_liters_per_kwh(load_frac: float) -> float:
+            if self.diesel_sfc_curve and isinstance(self.diesel_sfc_curve, (list, tuple)) and len(self.diesel_sfc_curve) > 0:
+                pts = sorted([(float(x), float(y)) for x, y in self.diesel_sfc_curve])
+                xs = np.array([p[0] for p in pts], dtype=float)
+                ys = np.array([p[1] for p in pts], dtype=float)
+                lf = float(np.clip(load_frac, xs[0], xs[-1]))
+                return float(np.interp(lf, xs, ys))
+            # Fallback to constant efficiency from kWh per liter
+            base = self.diesel_kwh_per_l
+            return (1.0 / base) if base > 0 else 1e9
+
+        lpkwh = _diesel_liters_per_kwh(frac) if self._genset_on else 0.0
+        liters_start = self.diesel_startup_liters if started else 0.0
+        liters_need_for_energy = e_diesel_req * lpkwh
+        total_liters_needed = liters_start + liters_need_for_energy
+
+        if self._genset_on and total_liters_needed > liters_available:
+            # Fuel-limited: reduce energy output
+            rem = max(0.0, liters_available - liters_start)
+            e_diesel = max(0.0, rem / max(lpkwh, 1e-12))
+            liters_used = liters_available  # consume everything
+            # Adjust effective fraction for info only
+            frac = (e_diesel / max(self.dt, 1e-12)) / max(self.diesel_kw_rated, 1e-12)
+            p_diesel = e_diesel / max(self.dt, 1e-12)
+        else:
+            e_diesel = e_diesel_req if self._genset_on else 0.0
+            liters_used = liters_start + (e_diesel * lpkwh if self._genset_on else 0.0)
+        
+        # Track operation hours for maintenance budget
+        if self._genset_on:
+            self._total_operation_hours += self.dt
 
         # ------------------ PV generation ------------------ #
         # NASA POWER hourly ALLSKY_SFC_SW_DWN is kWh/m^2 over the hour.
         # Scale by area and efficiency (and dt for non-1h steps).
         ghi = float(self.df.iloc[self._t]["ALLSKY_SFC_SW_DWN"])  # kWh/m^2
         temp_C = float(self.df.iloc[self._t]["T2M"])
+
+        # ------------------ Temperature-dependent battery efficiency ------------------ #
+        # Dependent on POWER T2M values
+        eta_temp = np.sqrt(self.batt_eta_rt) * (1.0 + self.temp_coeff * (temp_C - 25.0)/100)
+        self.eta_ch = eta_temp
+        self.eta_dis = eta_temp
+
         pv_eff_temp = self.pv_eff * (1.0 + self.temp_coeff * (temp_C - 25.0))
         e_solar = max(0.0, ghi * self.panel_area * pv_eff_temp * self.derate_soiling * self.dt)
 
@@ -172,30 +282,64 @@ class MicrogridEnv(gym.Env):
 
         # ------------------ Battery physics ---------------- #
         soc_kwh = self._soc * self.batt_cap
-
         if e_batt_req >= 0:
-            # Discharge: deliver energy to the AC bus, limited by SOC and power
             e_deliverable = min(e_batt_req, max(0.0, soc_kwh - self.soc_min * self.batt_cap)) * self.eta_dis
             soc_kwh -= e_deliverable / self.eta_dis
-            e_batt_ac = e_deliverable  # positive to AC bus
+            e_batt_ac = e_deliverable
         else:
-            # Charge: draw energy from AC bus, store with charge efficiency
-            e_store_request = -e_batt_req  # positive energy to store (AC side)
+            e_store_request = -e_batt_req
             cap_room = max(0.0, self.soc_max * self.batt_cap - soc_kwh)
-            # Energy that actually becomes chemical energy after efficiency
             e_storable = min(e_store_request * self.eta_ch, cap_room)
             soc_kwh += e_storable
-            # AC side sees a draw (negative delivered)
-            e_batt_ac = -e_storable / self.eta_ch  # negative to AC bus
+            e_batt_ac = -e_storable / self.eta_ch
 
-        # Update normalized SOC (clamped)
+        # ------------------ Inverter limit & efficiency ------------------ #
+        # Limit to max inverter power for this step
+        e_batt_ac = np.clip(e_batt_ac, -self.inverter_max_kw * self.dt, self.inverter_max_kw * self.dt)
+
+        # Interpolate efficiency from curve
+        power_pts = [point["power"] for point in self.inverter_eff_curve]
+        eff_pts = [point["efficiency"] for point in self.inverter_eff_curve]
+        efficiency = np.interp(abs(e_batt_ac), power_pts, eff_pts)
+
+        # Apply efficiency
+        e_batt_ac *= efficiency
+
+        # ------------------ Track battery throughput ------------------ #
+        self.battery_cycle_kwh += abs(e_batt_ac)
+
+        # ------------------ Update SOC ------------------ #
         self._soc = float(np.clip(soc_kwh / self.batt_cap, self.soc_min, self.soc_max))
+        self._soc_history.append(self._soc)
 
         # ------------------ Fuel bookkeeping --------------- #
         # Consume fuel based on e_diesel produced
         fuel_abs = self._fuel * self.fuel_tank_l - liters_used
         fuel_abs = max(0.0, fuel_abs)
+
+        # Optional auto-refuel
+        refueled_liters = 0.0
+        refuel_cost = 0.0
+        if self.auto_refuel and self.refuel_threshold_pct > 0.0:
+            fuel_pct = fuel_abs / self.fuel_tank_l if self.fuel_tank_l > 0 else 0.0
+            if fuel_pct < self.refuel_threshold_pct:
+                target_l = np.clip(self.refuel_target_pct, 0.0, 1.0) * self.fuel_tank_l
+                add = max(0.0, target_l - fuel_abs)
+                if add > 0:
+                    refueled_liters = add
+                    refuel_cost = add * self.refuel_cost_per_liter + self.refuel_delivery_fee
+                    fuel_abs = min(self.fuel_tank_l, fuel_abs + add)
+
         self._fuel = fuel_abs / self.fuel_tank_l
+
+        # ------------------ Maintenance cost calculation ---- #
+        maintenance_cost = 0.0
+        if self.maintenance_hours_budget_per_week > 0.0:
+            # Calculate current week's budget based on elapsed time
+            elapsed_weeks = (self._t * self.dt) / (7.0 * 24.0)  # Convert hours to weeks
+            budget_hours = elapsed_weeks * self.maintenance_hours_budget_per_week
+            over_budget_hours = max(0.0, self._total_operation_hours - budget_hours)
+            maintenance_cost = over_budget_hours * self.maintenance_cost_per_hour_over_budget
 
         # ------------------ Power balance ------------------ #
         supply = e_solar + max(0.0, e_batt_ac) + e_diesel
@@ -208,17 +352,40 @@ class MicrogridEnv(gym.Env):
         r = 0.0
         r -= float(self.rw["blackout_penalty_per_kwh"]) * unmet
         r -= float(self.rw["diesel_cost_weight"]) * liters_used * self.fuel_cost
+        # Charge refuel cost similarly
+        if refuel_cost > 0:
+            r -= float(self.rw["diesel_cost_weight"]) * refuel_cost
+        # Charge maintenance cost
+        if maintenance_cost > 0:
+            r -= float(self.rw["diesel_cost_weight"]) * maintenance_cost
         r -= float(self.rw["battery_cycle_weight"]) * abs(e_batt_ac)
         r -= float(self.rw["curtailment_weight"]) * curtailment
+        # Generator operation penalties
+        if started:
+            r -= float(self.rw["generator_start_penalty"])
+        if self._genset_on:
+            r -= float(self.rw["generator_operation_hour_penalty"]) * self.dt
         # Small shaping bonus for keeping SOC away from hard limits
         if self.soc_min + 0.05 <= self._soc <= self.soc_max - 0.05:
             r += float(self.rw["keep_soc_in_band_bonus"])
+
+        # ------------------ Degradation penalty ------------------ #
+        if self.degradation_weight > 0:
+            r -= self.degradation_weight * abs(e_batt_ac) # think about changing to mid-band cycling
 
         # ------------------ Time advance ------------------- #
         next_t = self._t + 1
         # Horizon reached or we ran out of data
         truncated = (next_t >= self._episode_steps) or (next_t >= len(self.load))
         terminated = False  # set True only for real terminal faults if you add them
+
+        # Update genset counters for min on/off tracking
+        if self._genset_on:
+            self._on_steps += 1
+            self._off_steps = 0
+        else:
+            self._off_steps += 1
+            self._on_steps = 0
 
         # Clamp internal index so _obs() never reads past the dataframe
         self._t = min(next_t, len(self.df) - 1)
@@ -233,7 +400,29 @@ class MicrogridEnv(gym.Env):
             "liters_used": liters_used,
             "soc": self._soc,
             "fuel": self._fuel,
+            "genset_on": bool(self._genset_on),
+            "diesel_load_frac": float(frac),
+            "diesel_liters_per_kwh": float(lpkwh) if self._genset_on else 0.0,
+            "startup_liters": float(liters_start),
+            "refueled_liters": float(refueled_liters),
+            "refuel_cost": float(refuel_cost),
+            "maintenance_cost": float(maintenance_cost),
         }
+
+        # ------------------ Equivalent full cycles ------------------ #
+        if terminated or truncated:
+        # Compute equivalent full cycles for battery using rainflow method per episode end
+            try:
+                import rainflow
+                cycles = rainflow.count_cycles(self._soc_history)
+                equiv_full_cycles = sum(abs(c) for c in cycles)
+                self.equiv_full_cycles = equiv_full_cycles
+                print(f"Episode ended - Equivalent full cycles: {equiv_full_cycles:.3f}")
+            except Exception as error:
+                print(f"Rainflow analysis failed: {error}")
+                equiv_full_cycles = None
+        # Rainflow-based equivalent full battery cycles per episode
+        info["equiv_full_cycles"] = getattr(self, "equiv_full_cycles", None)
 
         return self._obs(), float(r), terminated, truncated, info
 

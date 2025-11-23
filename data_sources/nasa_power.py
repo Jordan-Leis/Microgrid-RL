@@ -105,7 +105,7 @@ def fetch_power_hourly(
     lon: float,
     start: str,
     end: str,
-    parameters: str = "ALLSKY_SFC_SW_DWN,T2M",
+    parameters: str = "ALLSKY_SFC_SW_DWN,CLRSKY_SFC_SW_DWN,T2M",
     tz: Optional[str] = None,
     timeout: int = 60,
 ) -> pd.DataFrame:
@@ -143,13 +143,59 @@ def fetch_power_hourly(
     r = requests.get(base, params=payload, timeout=timeout)
     r.raise_for_status()
 
-    text = r.text.replace("\r\n", "\n")
-    lines = text.splitlines()
-    hdr_idx = _find_header_index(lines)
-    clean_csv = "\n".join(lines[hdr_idx:])
+    # Validate we actually received CSV; if not, surface a helpful error
+    content_type = (r.headers.get("Content-Type") or "").lower()
+    if "csv" not in content_type:
+        # Some API errors may still return 200 with HTML/JSON; try to extract message
+        detail = None
+        try:
+            detail = r.json()
+        except Exception:
+            # Fallback: first 500 chars of text body
+            detail = r.text[:500]
+        raise RuntimeError(
+            f"NASA POWER returned non-CSV response (Content-Type: {content_type or 'unknown'}). Details: {detail}"
+        )
 
-    df = pd.read_csv(io.StringIO(clean_csv))
-    df.columns = [c.strip() for c in df.columns]
+    # POWER CSV has many comment/header lines starting with '#'. In some cases
+    # pandas' C engine struggles to auto-detect the header when comments and
+    # preamble vary. Normalize by stripping comment/blank lines, then parse with
+    # the python engine for robustness.
+    text = r.text
+    # Strip UTF-8 BOM if present
+    if text and text[0] == "\ufeff":
+        text = text.lstrip("\ufeff")
+
+    lines = [ln for ln in text.splitlines() if ln and not ln.lstrip().startswith("#")]
+    if not lines:
+        raise RuntimeError("Received empty CSV after removing comment lines from NASA POWER response")
+
+    # Detect header line: look for DATE or YEAR/MO/DY variants; otherwise use
+    # the first row that appears tabular (same number of fields as following row)
+    header_idx = None
+    for i, ln in enumerate(lines):
+        toks = [t.strip().strip('"').upper() for t in ln.split(",")]
+        has_date = "DATE" in toks
+        has_ymd = ("YEAR" in toks or "YYYY" in toks) and ("MO" in toks or "MM" in toks) and ("DY" in toks or "DD" in toks)
+        if has_date or has_ymd:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        # Fallback: basic heuristic based on stable field counts
+        for i in range(len(lines) - 2):
+            c0 = lines[i].count(",")
+            c1 = lines[i + 1].count(",")
+            c2 = lines[i + 2].count(",")
+            if c0 > 0 and c0 == c1 == c2:
+                header_idx = i
+                break
+
+    if header_idx is None:
+        raise RuntimeError("Could not locate CSV header in NASA POWER response after removing comments")
+
+    csv_str = "\n".join(lines[header_idx:])
+    df = pd.read_csv(io.StringIO(csv_str), engine="python")
 
     # Build UTC datetime
     dt = _build_datetime(df)
