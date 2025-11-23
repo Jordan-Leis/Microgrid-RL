@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import gymnasium as gym
 from gymnasium import spaces
+import rainflow
 
 
 class MicrogridEnv(gym.Env):
@@ -59,6 +60,11 @@ class MicrogridEnv(gym.Env):
         b = self.cfg["battery"]
         d = self.cfg["diesel"]
         s = self.cfg["solar"]
+
+        # --- Inverter (from config) ---
+        self.inverter_max_kw = float(self.cfg["inverter_max_kw"])
+        self.inverter_eff_curve = self.cfg["inverter_efficiency_curve"]
+        self.degradation_weight = float(self.cfg.get("degradation_weight", 0.0))
 
         # Battery
         self.batt_cap = float(b["capacity_kwh"])
@@ -139,6 +145,8 @@ class MicrogridEnv(gym.Env):
         self._t = 0
         self._soc = float(self.cfg["battery"]["soc_init_pct"])
         self._fuel = float(self.cfg["diesel"]["fuel_init_pct"])
+        self.battery_cycle_kwh = 0.0
+        self._soc_history = [self._soc]
         return self._obs(), {}
 
     def step(self, action):
@@ -164,6 +172,13 @@ class MicrogridEnv(gym.Env):
         # Scale by area and efficiency (and dt for non-1h steps).
         ghi = float(self.df.iloc[self._t]["ALLSKY_SFC_SW_DWN"])  # kWh/m^2
         temp_C = float(self.df.iloc[self._t]["T2M"])
+
+        # ------------------ Temperature-dependent battery efficiency ------------------ #
+        # Dependent on POWER T2M values
+        eta_temp = np.sqrt(self.batt_eta_rt) * (1.0 + self.temp_coeff * (temp_C - 25.0)/100)
+        self.eta_ch = eta_temp
+        self.eta_dis = eta_temp
+
         pv_eff_temp = self.pv_eff * (1.0 + self.temp_coeff * (temp_C - 25.0))
         e_solar = max(0.0, ghi * self.panel_area * pv_eff_temp * self.derate_soiling * self.dt)
 
@@ -172,24 +187,35 @@ class MicrogridEnv(gym.Env):
 
         # ------------------ Battery physics ---------------- #
         soc_kwh = self._soc * self.batt_cap
-
         if e_batt_req >= 0:
-            # Discharge: deliver energy to the AC bus, limited by SOC and power
             e_deliverable = min(e_batt_req, max(0.0, soc_kwh - self.soc_min * self.batt_cap)) * self.eta_dis
             soc_kwh -= e_deliverable / self.eta_dis
-            e_batt_ac = e_deliverable  # positive to AC bus
+            e_batt_ac = e_deliverable
         else:
-            # Charge: draw energy from AC bus, store with charge efficiency
-            e_store_request = -e_batt_req  # positive energy to store (AC side)
+            e_store_request = -e_batt_req
             cap_room = max(0.0, self.soc_max * self.batt_cap - soc_kwh)
-            # Energy that actually becomes chemical energy after efficiency
             e_storable = min(e_store_request * self.eta_ch, cap_room)
             soc_kwh += e_storable
-            # AC side sees a draw (negative delivered)
-            e_batt_ac = -e_storable / self.eta_ch  # negative to AC bus
+            e_batt_ac = -e_storable / self.eta_ch
 
-        # Update normalized SOC (clamped)
+        # ------------------ Inverter limit & efficiency ------------------ #
+        # Limit to max inverter power for this step
+        e_batt_ac = np.clip(e_batt_ac, -self.inverter_max_kw * self.dt, self.inverter_max_kw * self.dt)
+
+        # Interpolate efficiency from curve
+        power_pts = [point["power"] for point in self.inverter_eff_curve]
+        eff_pts = [point["efficiency"] for point in self.inverter_eff_curve]
+        efficiency = np.interp(abs(e_batt_ac), power_pts, eff_pts)
+
+        # Apply efficiency
+        e_batt_ac *= efficiency
+
+        # ------------------ Track battery throughput ------------------ #
+        self.battery_cycle_kwh += abs(e_batt_ac)
+
+        # ------------------ Update SOC ------------------ #
         self._soc = float(np.clip(soc_kwh / self.batt_cap, self.soc_min, self.soc_max))
+        self._soc_history.append(self._soc)
 
         # ------------------ Fuel bookkeeping --------------- #
         # Consume fuel based on e_diesel produced
@@ -214,6 +240,10 @@ class MicrogridEnv(gym.Env):
         if self.soc_min + 0.05 <= self._soc <= self.soc_max - 0.05:
             r += float(self.rw["keep_soc_in_band_bonus"])
 
+        # ------------------ Degradation penalty ------------------ #
+        if self.degradation_weight > 0:
+            r -= self.degradation_weight * abs(e_batt_ac) # think about changing to mid-band cycling
+
         # ------------------ Time advance ------------------- #
         next_t = self._t + 1
         # Horizon reached or we ran out of data
@@ -233,7 +263,23 @@ class MicrogridEnv(gym.Env):
             "liters_used": liters_used,
             "soc": self._soc,
             "fuel": self._fuel,
+            "battery_cycle_kwh": self.battery_cycle_kwh,
         }
+
+        # ------------------ Equivalent full cycles ------------------ #
+        if terminated or truncated:
+        # Compute equivalent full cycles for battery using rainflow method per episode end
+            try:
+                import rainflow
+                cycles = rainflow.count_cycles(self._soc_history)
+                equiv_full_cycles = sum(abs(c) for c in cycles)
+                self.equiv_full_cycles = equiv_full_cycles
+                print(f"Episode ended - Equivalent full cycles: {equiv_full_cycles:.3f}")
+            except Exception as error:
+                print(f"Rainflow analysis failed: {error}")
+                equiv_full_cycles = None
+        # Rainflow-based equivalent full battery cycles per episode
+        info["equiv_full_cycles"] = getattr(self, "equiv_full_cycles", None)
 
         return self._obs(), float(r), terminated, truncated, info
 
