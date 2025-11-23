@@ -45,3 +45,23 @@ reward:
   keep_soc_in_band_bonus: 0.02
 
 seed: 0
+
+load_scenarios:
+  rural_village_small:
+    num_households: 10
+    weekday_factor: 1.0
+    weekend_factor: 1.2
+    add_noise: true
+    noise_std: 0.05
+  clinic:
+    num_households: 1
+    weekday_factor: 1.1
+    weekend_factor: 0.8
+    add_noise: true
+    noise_std: 0.03
+  school:
+    num_households: 1
+    weekday_factor: 1.2
+    weekend_factor: 0.5
+    add_noise: true
+    noise_std: 0.04
