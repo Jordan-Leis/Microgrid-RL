@@ -10,4 +10,5 @@ python scripts/download_nasa_power.py --lat -1.2921 --lon 36.8219 --start 2024-0
 python scripts/train_sac.py --lat -1.2921 --lon 36.8219 --days 180
 ```
 ## Contributors
+- Taha Subzwari
 - Siri Sujay
