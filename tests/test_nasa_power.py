@@ -37,16 +37,23 @@ def test_reindex_and_impute(sample_hourly_utc_df):
     assert any((v > 12 and v < 15) for v in vals)
 
 def test_localize_and_hour_feature_dst():
-    # Create a simple 3-hour sequence in UTC that spans US DST start: 2021-03-14 01:00 UTC -> local conversion to America/New_York (EST->EDT)
-    times = [datetime(2021,3,14,h,tzinfo=timezone.utc) for h in (4,5,6)]  # corresponds to local 00:00,01:00,02:00? depends
+    times = [datetime(2021,3,14,h,tzinfo=timezone.utc) for h in (4,5,6)]
     df = pd.DataFrame(index=pd.DatetimeIndex(times), data={"T2M":[1,2,3]})
+
     df_local = npower._localize_and_fix_hours(df, tz_name="America/New_York")
-    # hour_of_day column should exist and be consistent with local timezone
+
+    # hour_of_day column should exist
     assert "hour_of_day" in df_local.columns
-    # ensure tz is the requested zone
+
+    # ensure tz is correct
     assert str(df_local.index.tz) == "America/New_York"
-    # check a couple of hour_of_day values are in 0-23
+
+    # hour values should be valid
     assert all(0 <= h <= 23 for h in df_local["hour_of_day"].unique())
+
+    # 🔑 NEW: hour_of_day must match localized datetime hour
+    assert (df_local["hour_of_day"].values == df_local.index.hour.values).all()
+
 
 def test_cache_save_and_reuse(tmp_path, monkeypatch):
     # monkeypatch the API call to return a small df
