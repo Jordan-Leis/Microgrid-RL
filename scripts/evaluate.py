@@ -1,6 +1,8 @@
-import argparse
+import argparse, yaml, json
+from pathlib import Path
 from stable_baselines3 import SAC, A2C
 from scripts.train_common import build_env
+from scripts.metrics_logger import EpisodeMetricsAccumulator
 
 def main():
     ap = argparse.ArgumentParser()
@@ -10,9 +12,17 @@ def main():
     ap.add_argument('--lon', type=float, required=True)
     ap.add_argument('--days', type=int, default=60)
     ap.add_argument('--cfg', type=str, default='configs/default.yaml')
+    ap.add_argument('--n_episodes', type=int, default=1, help='Number of evaluation episodes')
+    ap.add_argument('--output', type=str, default=None, help='Output JSON file for results')
     args = ap.parse_args()
 
+    # Load config
+    cfg = yaml.safe_load(open(args.cfg, 'r'))
+    
+    # Build environment
     env = build_env(args.cfg, args.lat, args.lon, args.days)
+    
+    # Load model
     model = SAC.load(args.model) if args.algo=='sac' else A2C.load(args.model)
 
     obs, _ = env.reset()

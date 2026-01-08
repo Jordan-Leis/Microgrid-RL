@@ -8,3 +8,6 @@ matplotlib>=3.8
 stable-baselines3>=2.3.0
 torch>=2.2
 tqdm>=4.66
+
+# Optional - W&B integration
+wandb
