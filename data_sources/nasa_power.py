@@ -9,6 +9,8 @@ from typing import Optional, List
 import pandas as pd
 import requests
 
+# >>>> New: zoneinfo for robust timezone handling
+from zoneinfo import ZoneInfo
 
 CACHE_DIR = os.path.join("data", "cache")
 os.makedirs(CACHE_DIR, exist_ok=True)
@@ -56,6 +58,9 @@ def _find_hour_col(columns: List[str]) -> str:
 
 
 def _build_datetime(df: pd.DataFrame) -> pd.Series:
+    """
+    Build a UTC datetime from typical POWER date/hour columns.
+    """
     cols = set(df.columns)
 
     if "DATE" in cols:
@@ -76,7 +81,23 @@ def _build_datetime(df: pd.DataFrame) -> pd.Series:
     hour_col = _find_hour_col(list(df.columns))
     hours = pd.to_numeric(df[hour_col], errors="coerce").fillna(0).astype(int)
     hours = hours % 24  # normalize 1..24 → 0..23
-    return pd.to_datetime(date_str, format="%Y%m%d") + pd.to_timedelta(hours, unit="h")
+    # >>>> Make UTC tz-aware here
+    dt = pd.to_datetime(date_str, format="%Y%m%d") + pd.to_timedelta(hours, unit="h")
+    return dt.dt.tz_localize("UTC")
+
+
+# >>>> New helper: reindex hourly and fill gaps
+def _fill_hourly_gaps(df: pd.DataFrame) -> pd.DataFrame:
+    full_index = pd.date_range(
+        start=df.index.min(),
+        end=df.index.max(),
+        freq="H",
+        tz=df.index.tz,
+    )
+    df = df.reindex(full_index)
+    num_cols = df.select_dtypes(include="number").columns
+    df[num_cols] = df[num_cols].interpolate(method="linear", limit_direction="both")
+    return df
 
 
 def fetch_power_hourly(
@@ -84,24 +105,30 @@ def fetch_power_hourly(
     lon: float,
     start: str,
     end: str,
-    parameters: str = "ALLSKY_SFC_SW_DWN,T2M",
+    parameters: str = "ALLSKY_SFC_SW_DWN,CLRSKY_SFC_SW_DWN,T2M",
     tz: Optional[str] = None,
     timeout: int = 60,
 ) -> pd.DataFrame:
     """
     Fetch hourly NASA POWER data and return a tidy DataFrame with:
-        columns: ['datetime', <requested parameters that exist>]
+        index: local time (if tz provided) and continuous hourly steps
+        columns: [<requested parameters> , hour_of_day]
 
-    Notes
-    -----
-    - Timestamps are UTC (naive) unless `tz` is provided (e.g., 'Africa/Nairobi'),
-      in which case they're converted and tz info dropped.
-    - Handles multiple CSV schemas and weird preambles.
-    - Caches results under data/cache/.
+    Handles:
+    - Local timezone conversion and hour_of_day calculation
+    - Gap filling by linear interpolation
+    - Cache reuse
     """
     cache = _cache_path(lat, lon, start, end, parameters, tz)
     if os.path.exists(cache):
-        return pd.read_csv(cache, parse_dates=["datetime"])
+        # >>>> Read cached file as time-indexed DF
+        cached = pd.read_csv(cache, parse_dates=["datetime"])
+        cached = cached.set_index(pd.to_datetime(cached["datetime"]))
+        cached = cached.drop(columns=["datetime"])
+        # ensure tz info if available
+        if tz:
+            cached.index = cached.index.tz_localize(tz)
+        return cached
 
     base = "https://power.larc.nasa.gov/api/temporal/hourly/point"
     payload = {
@@ -116,20 +143,65 @@ def fetch_power_hourly(
     r = requests.get(base, params=payload, timeout=timeout)
     r.raise_for_status()
 
-    text = r.text.replace("\r\n", "\n")
-    lines = text.splitlines()
-    hdr_idx = _find_header_index(lines)
-    clean_csv = "\n".join(lines[hdr_idx:])
+    # Validate we actually received CSV; if not, surface a helpful error
+    content_type = (r.headers.get("Content-Type") or "").lower()
+    if "csv" not in content_type:
+        # Some API errors may still return 200 with HTML/JSON; try to extract message
+        detail = None
+        try:
+            detail = r.json()
+        except Exception:
+            # Fallback: first 500 chars of text body
+            detail = r.text[:500]
+        raise RuntimeError(
+            f"NASA POWER returned non-CSV response (Content-Type: {content_type or 'unknown'}). Details: {detail}"
+        )
 
-    # Read the cleaned CSV
-    df = pd.read_csv(io.StringIO(clean_csv))
-    # Trim whitespace in column names for safety
-    df.columns = [c.strip() for c in df.columns]
+    # POWER CSV has many comment/header lines starting with '#'. In some cases
+    # pandas' C engine struggles to auto-detect the header when comments and
+    # preamble vary. Normalize by stripping comment/blank lines, then parse with
+    # the python engine for robustness.
+    text = r.text
+    # Strip UTF-8 BOM if present
+    if text and text[0] == "\ufeff":
+        text = text.lstrip("\ufeff")
 
-    # Build a proper datetime index
+    lines = [ln for ln in text.splitlines() if ln and not ln.lstrip().startswith("#")]
+    if not lines:
+        raise RuntimeError("Received empty CSV after removing comment lines from NASA POWER response")
+
+    # Detect header line: look for DATE or YEAR/MO/DY variants; otherwise use
+    # the first row that appears tabular (same number of fields as following row)
+    header_idx = None
+    for i, ln in enumerate(lines):
+        toks = [t.strip().strip('"').upper() for t in ln.split(",")]
+        has_date = "DATE" in toks
+        has_ymd = ("YEAR" in toks or "YYYY" in toks) and ("MO" in toks or "MM" in toks) and ("DY" in toks or "DD" in toks)
+        if has_date or has_ymd:
+            header_idx = i
+            break
+
+    if header_idx is None:
+        # Fallback: basic heuristic based on stable field counts
+        for i in range(len(lines) - 2):
+            c0 = lines[i].count(",")
+            c1 = lines[i + 1].count(",")
+            c2 = lines[i + 2].count(",")
+            if c0 > 0 and c0 == c1 == c2:
+                header_idx = i
+                break
+
+    if header_idx is None:
+        raise RuntimeError("Could not locate CSV header in NASA POWER response after removing comments")
+
+    csv_str = "\n".join(lines[header_idx:])
+    df = pd.read_csv(io.StringIO(csv_str), engine="python")
+
+    # Build UTC datetime
     dt = _build_datetime(df)
+    df = df.set_index(dt)
 
-    # Keep only requested params that actually exist in this file
+    # Keep only requested params that actually exist
     requested = [p.strip() for p in parameters.split(",") if p.strip()]
     present = [c for c in requested if c in df.columns]
     if not present:
@@ -137,17 +209,23 @@ def fetch_power_hourly(
             f"None of requested parameters {requested} found. "
             f"Columns: {df.columns.tolist()[:12]}"
         )
+    df = df[present]
 
-    out = pd.DataFrame({"datetime": dt})
-    for c in present:
-        out[c] = pd.to_numeric(df[c], errors="coerce")
-
-    # Optional timezone conversion (assumes NASA times are UTC)
+    # >>>> Convert to local tz if provided
     if tz:
-        out["datetime"] = pd.to_datetime(out["datetime"], utc=True).dt.tz_convert(tz).dt.tz_localize(None)
+        tzinfo = ZoneInfo(tz)
+        df = df.tz_convert(tzinfo)
 
-    out = out.sort_values("datetime").drop_duplicates(subset=["datetime"]).reset_index(drop=True)
+    # >>>> Fill missing hourly rows
+    df = _fill_hourly_gaps(df)
 
-    os.makedirs(os.path.dirname(cache), exist_ok=True)
+    # >>>> Add hour_of_day feature in local time
+    df["hour_of_day"] = df.index.hour
+
+    # >>>> Save to cache with datetime column for portability
+    out = df.copy()
+    out.reset_index(inplace=True)
+    out.rename(columns={"index": "datetime"}, inplace=True)
     out.to_csv(cache, index=False)
-    return out
+
+    return df
