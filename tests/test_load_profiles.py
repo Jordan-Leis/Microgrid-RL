@@ -119,35 +119,41 @@ def test_weather_scaler_hourly():
     cool_scale = weather_scaler_hourly(20.0, kind="household")
     assert all(cool_scale == 1.0)  # No scaling below baseline
 
-def test_get_daily_load():
+def test_get_daily_load(tmp_path, sample_load_profiles):
     """Test daily load profile generation"""
+
+    # Create the CSV that get_daily_load expects
+    test_csv = tmp_path / "load_profiles.csv"
+    sample_load_profiles.to_csv(test_csv, index=False)
+
     # Test basic weekday profile
     df = get_daily_load(
         day_of_year=180,  # Summer day
         n_households=10,
         n_commercial=1,
         weekend=False,
-        seed=42
+        seed=42,
+        path=test_csv,  # <-- key fix: use temp CSV instead of repo file
     )
-    
+
     assert isinstance(df, pd.DataFrame)
-    assert list(df.columns) == ['hour', 'household_kw', 'commercial_kw', 
-                               'total_kw', 'temp_C', 'weekend']
+    assert list(df.columns) == ["hour", "household_kw", "commercial_kw", "total_kw", "temp_C", "weekend"]
     assert len(df) == 24
-    assert all(df['total_kw'] == df['household_kw'] + df['commercial_kw'])
-    assert not df['weekend'].iloc[0]
-    
+    assert all(df["total_kw"] == df["household_kw"] + df["commercial_kw"])
+    assert not df["weekend"].iloc[0]
+
     # Test weekend profile
     df_weekend = get_daily_load(
         day_of_year=180,
         n_households=10,
         n_commercial=1,
         weekend=True,
-        seed=42
+        seed=42,
+        path=test_csv,  # <-- same temp CSV
     )
-    assert df_weekend['weekend'].iloc[0]
-    
+    assert df_weekend["weekend"].iloc[0]
+
     # Test reproducibility
-    df1 = get_daily_load(day_of_year=180, seed=42)
-    df2 = get_daily_load(day_of_year=180, seed=42)
-    assert all(df1['total_kw'] == df2['total_kw'])
+    df1 = get_daily_load(day_of_year=180, seed=42, path=test_csv)
+    df2 = get_daily_load(day_of_year=180, seed=42, path=test_csv)
+    assert all(df1["total_kw"] == df2["total_kw"])

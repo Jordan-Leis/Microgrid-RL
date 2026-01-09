@@ -91,7 +91,7 @@ def _fill_hourly_gaps(df: pd.DataFrame) -> pd.DataFrame:
     full_index = pd.date_range(
         start=df.index.min(),
         end=df.index.max(),
-        freq="H",
+        freq="h",
         tz=df.index.tz,
     )
     df = df.reindex(full_index)
@@ -120,15 +120,30 @@ def fetch_power_hourly(
     - Cache reuse
     """
     cache = _cache_path(lat, lon, start, end, parameters, tz)
+    
+    
+   
     if os.path.exists(cache):
-        # >>>> Read cached file as time-indexed DF
         cached = pd.read_csv(cache, parse_dates=["datetime"])
         cached = cached.set_index(pd.to_datetime(cached["datetime"]))
         cached = cached.drop(columns=["datetime"])
-        # ensure tz info if available
+
+        cached.index.name = "datetime"
+
         if tz:
-            cached.index = cached.index.tz_localize(tz)
+            tzinfo = ZoneInfo(tz)
+            if cached.index.tz is None:
+                cached.index = cached.index.tz_localize(tzinfo)
+            else:
+                cached.index = cached.index.tz_convert(tzinfo)
+
+    # Normalize to the same hourly index behavior as the fresh-fetch path
+        cached = _fill_hourly_gaps(cached)
+        cached.index.name = "datetime"
+        cached["hour_of_day"] = cached.index.hour
+
         return cached
+
 
     base = "https://power.larc.nasa.gov/api/temporal/hourly/point"
     payload = {
@@ -200,6 +215,8 @@ def fetch_power_hourly(
     # Build UTC datetime
     dt = _build_datetime(df)
     df = df.set_index(dt)
+    df.index.name = "datetime"
+
 
     # Keep only requested params that actually exist
     requested = [p.strip() for p in parameters.split(",") if p.strip()]
@@ -218,6 +235,7 @@ def fetch_power_hourly(
 
     # >>>> Fill missing hourly rows
     df = _fill_hourly_gaps(df)
+    df.index.name = "datetime"
 
     # >>>> Add hour_of_day feature in local time
     df["hour_of_day"] = df.index.hour

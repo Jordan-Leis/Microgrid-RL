@@ -41,6 +41,22 @@ class MicrogridEnv(gym.Env):
         self.cfg = config
         # Ensure monotonically increasing, positional indexing
         self.df = solar_df.reset_index(drop=True)
+        # Preserve or create a datetime column
+        if "datetime" in solar_df.columns:
+            self.df = solar_df.reset_index(drop=True)
+        elif isinstance(solar_df.index, pd.DatetimeIndex):
+        # keep the datetime index as a column
+            self.df = solar_df.reset_index()
+        # name could be None or "datetime"; normalize
+            idx_name = solar_df.index.name or "index"
+            self.df = self.df.rename(columns={idx_name: "datetime", "index": "datetime"})
+        else:   
+            raise ValueError("solar_df must have a 'datetime' column or a DatetimeIndex")
+
+        # Ensure hour_of_day exists (lets _obs() avoid per-step datetime parsing)
+        if "hour_of_day" not in self.df.columns:
+            self.df["hour_of_day"] = pd.to_datetime(self.df["datetime"]).dt.hour
+
         self.load = np.asarray(load_series, dtype=float)
         assert len(self.df) >= len(self.load), "solar/load length mismatch"
 
@@ -132,6 +148,11 @@ class MicrogridEnv(gym.Env):
         # Track maintenance hours for budget enforcement
         self._total_operation_hours = 0.0
 
+        # ---- Added: episode metrics/state that must always exist ----
+        self.battery_cycle_kwh = 0.0
+        self._soc_history = []
+        self.equiv_full_cycles = None
+
     # --------------------------------------------------------------------- #
     # Helpers
     # --------------------------------------------------------------------- #
@@ -146,7 +167,8 @@ class MicrogridEnv(gym.Env):
 
         row = self.df.iloc[t]
         # Feature engineering
-        hour_norm = (pd.to_datetime(row["datetime"]).hour) / 23.0
+        hour_norm = float(row["hour_of_day"]) / 23.0
+
         ghi = float(row["ALLSKY_SFC_SW_DWN"])  # kWh/m^2 over the step
         temp_norm = float(row["T2M"]) / 50.0
         load_kwh = float(self.load[t])
@@ -172,13 +194,21 @@ class MicrogridEnv(gym.Env):
         self._t = 0
         self._soc = float(self.cfg["battery"]["soc_init_pct"])
         self._fuel = float(self.cfg["diesel"]["fuel_init_pct"])
+
         # Reset genset state; allow immediate start if desired (honor min_off if configured)
         self._genset_on = False
         self._on_steps = 0
         # Initialize off counter to at least min_off to allow start at t=0
         self._off_steps = self.min_off_steps
+
         # Reset maintenance tracking
         self._total_operation_hours = 0.0
+
+        # ---- Added: reset episode-scoped metrics ----
+        self.battery_cycle_kwh = 0.0
+        self._soc_history = [self._soc]
+        self.equiv_full_cycles = None
+
         return self._obs(), {}
 
     def step(self, action):
@@ -257,20 +287,17 @@ class MicrogridEnv(gym.Env):
         else:
             e_diesel = e_diesel_req if self._genset_on else 0.0
             liters_used = liters_start + (e_diesel * lpkwh if self._genset_on else 0.0)
-        
+
         # Track operation hours for maintenance budget
         if self._genset_on:
             self._total_operation_hours += self.dt
 
         # ------------------ PV generation ------------------ #
-        # NASA POWER hourly ALLSKY_SFC_SW_DWN is kWh/m^2 over the hour.
-        # Scale by area and efficiency (and dt for non-1h steps).
         ghi = float(self.df.iloc[self._t]["ALLSKY_SFC_SW_DWN"])  # kWh/m^2
         temp_C = float(self.df.iloc[self._t]["T2M"])
 
         # ------------------ Temperature-dependent battery efficiency ------------------ #
-        # Dependent on POWER T2M values
-        eta_temp = np.sqrt(self.batt_eta_rt) * (1.0 + self.temp_coeff * (temp_C - 25.0)/100)
+        eta_temp = np.sqrt(self.batt_eta_rt) * (1.0 + self.temp_coeff * (temp_C - 25.0) / 100)
         self.eta_ch = eta_temp
         self.eta_dis = eta_temp
 
@@ -294,15 +321,12 @@ class MicrogridEnv(gym.Env):
             e_batt_ac = -e_storable / self.eta_ch
 
         # ------------------ Inverter limit & efficiency ------------------ #
-        # Limit to max inverter power for this step
         e_batt_ac = np.clip(e_batt_ac, -self.inverter_max_kw * self.dt, self.inverter_max_kw * self.dt)
 
-        # Interpolate efficiency from curve
         power_pts = [point["power"] for point in self.inverter_eff_curve]
         eff_pts = [point["efficiency"] for point in self.inverter_eff_curve]
         efficiency = np.interp(abs(e_batt_ac), power_pts, eff_pts)
 
-        # Apply efficiency
         e_batt_ac *= efficiency
 
         # ------------------ Track battery throughput ------------------ #
@@ -313,7 +337,6 @@ class MicrogridEnv(gym.Env):
         self._soc_history.append(self._soc)
 
         # ------------------ Fuel bookkeeping --------------- #
-        # Consume fuel based on e_diesel produced
         fuel_abs = self._fuel * self.fuel_tank_l - liters_used
         fuel_abs = max(0.0, fuel_abs)
 
@@ -330,13 +353,12 @@ class MicrogridEnv(gym.Env):
                     refuel_cost = add * self.refuel_cost_per_liter + self.refuel_delivery_fee
                     fuel_abs = min(self.fuel_tank_l, fuel_abs + add)
 
-        self._fuel = fuel_abs / self.fuel_tank_l
+        self._fuel = fuel_abs / self.fuel_tank_l if self.fuel_tank_l > 0 else 0.0
 
         # ------------------ Maintenance cost calculation ---- #
         maintenance_cost = 0.0
         if self.maintenance_hours_budget_per_week > 0.0:
-            # Calculate current week's budget based on elapsed time
-            elapsed_weeks = (self._t * self.dt) / (7.0 * 24.0)  # Convert hours to weeks
+            elapsed_weeks = (self._t * self.dt) / (7.0 * 24.0)
             budget_hours = elapsed_weeks * self.maintenance_hours_budget_per_week
             over_budget_hours = max(0.0, self._total_operation_hours - budget_hours)
             maintenance_cost = over_budget_hours * self.maintenance_cost_per_hour_over_budget
@@ -352,32 +374,27 @@ class MicrogridEnv(gym.Env):
         r = 0.0
         r -= float(self.rw["blackout_penalty_per_kwh"]) * unmet
         r -= float(self.rw["diesel_cost_weight"]) * liters_used * self.fuel_cost
-        # Charge refuel cost similarly
         if refuel_cost > 0:
             r -= float(self.rw["diesel_cost_weight"]) * refuel_cost
-        # Charge maintenance cost
         if maintenance_cost > 0:
             r -= float(self.rw["diesel_cost_weight"]) * maintenance_cost
         r -= float(self.rw["battery_cycle_weight"]) * abs(e_batt_ac)
         r -= float(self.rw["curtailment_weight"]) * curtailment
-        # Generator operation penalties
         if started:
             r -= float(self.rw["generator_start_penalty"])
         if self._genset_on:
             r -= float(self.rw["generator_operation_hour_penalty"]) * self.dt
-        # Small shaping bonus for keeping SOC away from hard limits
         if self.soc_min + 0.05 <= self._soc <= self.soc_max - 0.05:
             r += float(self.rw["keep_soc_in_band_bonus"])
 
         # ------------------ Degradation penalty ------------------ #
         if self.degradation_weight > 0:
-            r -= self.degradation_weight * abs(e_batt_ac) # think about changing to mid-band cycling
+            r -= self.degradation_weight * abs(e_batt_ac)
 
         # ------------------ Time advance ------------------- #
         next_t = self._t + 1
-        # Horizon reached or we ran out of data
         truncated = (next_t >= self._episode_steps) or (next_t >= len(self.load))
-        terminated = False  # set True only for real terminal faults if you add them
+        terminated = False
 
         # Update genset counters for min on/off tracking
         if self._genset_on:
@@ -387,7 +404,6 @@ class MicrogridEnv(gym.Env):
             self._off_steps += 1
             self._on_steps = 0
 
-        # Clamp internal index so _obs() never reads past the dataframe
         self._t = min(next_t, len(self.df) - 1)
 
         info = {
@@ -407,25 +423,29 @@ class MicrogridEnv(gym.Env):
             "refueled_liters": float(refueled_liters),
             "refuel_cost": float(refuel_cost),
             "maintenance_cost": float(maintenance_cost),
+            "battery_cycle_kwh": float(self.battery_cycle_kwh),
         }
 
-        # ------------------ Equivalent full cycles ------------------ #
+        # ------------------ Equivalent full cycles (Rainflow) ------------------ #
         if terminated or truncated:
-        # Compute equivalent full cycles for battery using rainflow method per episode end
             try:
-                import rainflow
                 cycles = rainflow.count_cycles(self._soc_history)
-                equiv_full_cycles = sum(abs(c) for c in cycles)
-                self.equiv_full_cycles = equiv_full_cycles
-                print(f"Episode ended - Equivalent full cycles: {equiv_full_cycles:.3f}")
-            except Exception as error:
-                print(f"Rainflow analysis failed: {error}")
-                equiv_full_cycles = None
-        # Rainflow-based equivalent full battery cycles per episode
-        info["equiv_full_cycles"] = getattr(self, "equiv_full_cycles", None)
+                equiv = 0.0
+                for c in cycles:
+                    # common format: (range, mean, count)
+                    if isinstance(c, (tuple, list)) and len(c) >= 3:
+                        rng, mean, count = c[0], c[1], c[2]
+                        equiv += float(rng) * float(count)
+                    else:
+                        # fallback: treat as a numeric range
+                        equiv += float(c)
+                self.equiv_full_cycles = equiv / 2.0
+            except Exception:
+                self.equiv_full_cycles = None
+
+        info["equiv_full_cycles"] = self.equiv_full_cycles
 
         return self._obs(), float(r), terminated, truncated, info
 
     def render(self):
-        # No-op placeholder (hook up a pygame/plotly view if desired)
         pass
