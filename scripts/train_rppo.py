@@ -80,6 +80,8 @@ def main():
                 'lstm_hidden_size': args.hidden_size,
                 'n_lstm_layers': args.n_layers,
                 'shared_lstm': True,
+                # When using shared LSTM, disable separate critic LSTM to avoid assertion
+                'enable_critic_lstm': False,
             })
             policy = 'MlpLstmPolicy'
         else:
@@ -87,6 +89,8 @@ def main():
                 'gru_hidden_size': args.hidden_size,
                 'n_gru_layers': args.n_layers,
                 'shared_gru': True,
+                # When using shared GRU, disable separate critic GRU
+                'enable_critic_gru': False,
             })
             policy = 'MlpGruPolicy'
     else:

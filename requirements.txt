@@ -9,6 +9,7 @@ stable-baselines3>=2.3.0
 sb3-contrib>=2.3.0
 torch>=2.2
 tqdm>=4.66
+rainflow
 
 # Optional - W&B integration
 wandb
