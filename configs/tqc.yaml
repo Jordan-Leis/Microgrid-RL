@@ -1,0 +1,21 @@
+# Learning parameters
+learning_rate: 3.0e-4
+buffer_size: 1000000
+batch_size: 256
+gamma: 0.99
+tau: 0.005
+
+# Training schedule
+train_freq: 1
+gradient_steps: 1
+
+# Evaluation
+eval_freq: 10000
+n_eval_episodes: 10
+
+# Network architecture (match SAC)
+net_arch: [256, 256]
+
+# TQC-specific parameters
+n_quantiles: 25
+top_quantiles_to_drop_per_net: 2
