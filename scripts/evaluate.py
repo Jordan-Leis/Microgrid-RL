@@ -7,19 +7,20 @@ from stable_baselines3 import SAC, A2C, DDPG, PPO
 from stable_baselines3.common.base_class import BaseAlgorithm
 from scripts.train_common import build_env
 
-# Optional sb3-contrib for RecurrentPPO
+# Optional sb3-contrib for RecurrentPPO and TQC
 try:
-    from sb3_contrib import RecurrentPPO
+    from sb3_contrib import RecurrentPPO, TQC
     SB3_CONTRIB_AVAILABLE = True
 except ImportError:
     RecurrentPPO = None
+    TQC = None
     SB3_CONTRIB_AVAILABLE = False
 
 
 def parse_args():
    p = argparse.ArgumentParser()
    p.add_argument("--model", type=str, required=True)
-   p.add_argument("--algo", type=str, choices=["sac", "a2c", "ddpg", "ppo", "rppo"], required=True)
+   p.add_argument("--algo", type=str, choices=["sac", "a2c", "ddpg", "ppo", "rppo", "tqc"], required=True)
    p.add_argument("--lat", type=float, required=True)
    p.add_argument("--lon", type=float, required=True)
    p.add_argument("--days", type=int, default=60) # default 180 in stub?
@@ -59,6 +60,10 @@ def main():
        if not SB3_CONTRIB_AVAILABLE:
            raise ImportError("sb3-contrib required for rppo. Install with: pip install sb3-contrib>=2.3.0")
        model: BaseAlgorithm = RecurrentPPO.load(args.model, env=env)
+   elif args.algo == "tqc":
+       if not SB3_CONTRIB_AVAILABLE:
+           raise ImportError("sb3-contrib required for tqc. Install with: pip install sb3-contrib>=2.3.0")
+       model: BaseAlgorithm = TQC.load(args.model, env=env)
    else:
        raise ValueError(f"Unsupported algo {args.algo}")
 
