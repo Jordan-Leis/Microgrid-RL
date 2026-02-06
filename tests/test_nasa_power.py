@@ -1,80 +1,142 @@
 # tests/test_nasa_power.py
+import os
 import pandas as pd
 import pytest
 from datetime import datetime, timezone, timedelta
 from zoneinfo import ZoneInfo
-import json
-from pathlib import Path
 
 import data_sources.nasa_power as npower
 
+
 @pytest.fixture
 def sample_hourly_utc_df():
-    # create hourly UTC data for 6 hours, but drop one hour to simulate missing hour
-    base = datetime(2021, 3, 13, 20, tzinfo=timezone.utc)  # around US DST (Mar 14 2021)
+    # 6 hours in UTC, remove one hour to simulate a gap
+    base = datetime(2021, 3, 13, 20, tzinfo=timezone.utc)
     times = [base + timedelta(hours=i) for i in range(6)]
-    # drop the 3rd hour to simulate a missing hour
-    del times[2]
-    vals = [10, 12, 15, 14, 13]  # correspond to times[0],1,3,4,5
-    df = pd.DataFrame(index=pd.DatetimeIndex(times), data={"T2M": vals})
-    return df
+    del times[2]  # remove base+2h
+    vals = [10, 12, 15, 14, 13]
+    return pd.DataFrame(index=pd.DatetimeIndex(times), data={"T2M": vals})
 
-def test_reindex_and_impute(sample_hourly_utc_df):
-    # ensure interpolation fills missing hour
-    # localize as UTC index with tz
+
+def test_fill_hourly_gaps(sample_hourly_utc_df):
     df = sample_hourly_utc_df.copy()
-    # df index already tz-aware UTC
-    # convert to local tz (UTC for simplicity here)
     df_local = df.tz_convert(ZoneInfo("UTC"))
-    df_filled = npower._reindex_and_impute(df_local)
-    # should have original 6 hours now
+
+    df_filled = npower._fill_hourly_gaps(df_local)
+
+    # should now have continuous 6 hours
     assert len(df_filled) == 6
-    # check that the previously-missing index exists and value is interpolated (between 12 and 15)
-    # find the interpolated value
-    vals = df_filled["T2M"].values
-    assert not pd.isna(vals).any()
-    # Interpolated value should be >12 and <15
-    assert any((v > 12 and v < 15) for v in vals)
 
-def test_localize_and_hour_feature_dst():
-    times = [datetime(2021,3,14,h,tzinfo=timezone.utc) for h in (4,5,6)]
-    df = pd.DataFrame(index=pd.DatetimeIndex(times), data={"T2M":[1,2,3]})
+    # ensure missing hour exists and is interpolated
+    missing_time = datetime(2021, 3, 13, 22, tzinfo=timezone.utc)
+    assert missing_time in df_filled.index
 
-    df_local = npower._localize_and_fix_hours(df, tz_name="America/New_York")
+    v = float(df_filled.loc[missing_time, "T2M"])
+    assert 12 < v < 15
 
-    # hour_of_day column should exist
+
+def _fake_power_csv(date_yyyymmdd: str, hours, values_by_param):
+    """
+    Build a minimal NASA POWER-like CSV response.
+    Expected by your parser: DATE + HOUR + parameter columns.
+    """
+    header = "DATE,HOUR," + ",".join(values_by_param.keys())
+    rows = [header]
+    for h in hours:
+        row = [date_yyyymmdd, str(h)]
+        for p in values_by_param.keys():
+            row.append(str(values_by_param[p][h]))
+        rows.append(",".join(row))
+    # add a comment line to mimic POWER preamble
+    return "# NASA POWER\n" + "\n".join(rows) + "\n"
+
+
+class _Resp:
+    def __init__(self, text):
+        self.text = text
+        self.headers = {"Content-Type": "text/csv"}
+
+    def raise_for_status(self):
+        return None
+
+
+def test_fetch_power_hourly_localize_and_hour_feature_dst(tmp_path, monkeypatch):
+    # Send cache into temp dir so tests don't touch real cache
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(npower, "CACHE_DIR", str(cache_dir))
+
+    # UTC hours that map into NY around DST start date (we don't assert exact hours,
+    # just that hour_of_day matches localized index hour)
+    csv_text = _fake_power_csv(
+        "20210314",
+        hours=[4, 5, 6],
+        values_by_param={"T2M": {4: 1, 5: 2, 6: 3}},
+    )
+
+    def fake_get(*args, **kwargs):
+        return _Resp(csv_text)
+
+    monkeypatch.setattr(npower.requests, "get", fake_get)
+
+    df_local = npower.fetch_power_hourly(
+        lat=10.0,
+        lon=20.0,
+        start="2021-03-14",
+        end="2021-03-14",
+        parameters="T2M",
+        tz="America/New_York",
+    )
+
     assert "hour_of_day" in df_local.columns
-
-    # ensure tz is correct
     assert str(df_local.index.tz) == "America/New_York"
-
-    # hour values should be valid
-    assert all(0 <= h <= 23 for h in df_local["hour_of_day"].unique())
-
-    # 🔑 NEW: hour_of_day must match localized datetime hour
     assert (df_local["hour_of_day"].values == df_local.index.hour.values).all()
 
 
 def test_cache_save_and_reuse(tmp_path, monkeypatch):
-    # monkeypatch the API call to return a small df
-    def fake_api(lat, lon, start, end, parameters, api_base=None):
-        times = pd.date_range(start="2022-01-01", periods=3, freq="H", tz=timezone.utc)
-        return pd.DataFrame(index=times, data={"T2M":[1,2,3]})
-    monkeypatch.setattr(npower, "_call_power_api", fake_api)
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(npower, "CACHE_DIR", str(cache_dir))
 
-    cache_dir = str(tmp_path / "cache")
-    # first call should create cache
-    df1 = npower.get_power(10.0, 20.0, "2022-01-01", "2022-01-01", location_tz="UTC", parameters="T2M", cache_dir=cache_dir, use_cache=True)
-    # check that cache files exist
-    # compute hash to find cache file
-    hsh = npower._params_hash(10.0, 20.0, "2022-01-01", "2022-01-01", "T2M")
-    cache_path, meta_path = npower._cache_path(cache_dir, hsh)
-    assert Path(meta_path).exists()
-    # second call should reuse cache; monkeypatch _call_power_api to raise if used
-    def failing_api(*args, **kwargs):
-        raise RuntimeError("API should not be called when cache available")
-    monkeypatch.setattr(npower, "_call_power_api", failing_api)
-    df2 = npower.get_power(10.0, 20.0, "2022-01-01", "2022-01-01", location_tz="UTC", parameters="T2M", cache_dir=cache_dir, use_cache=True)
-    # results should match
+    csv_text = _fake_power_csv(
+        "20220101",
+        hours=[0, 1, 2],
+        values_by_param={"T2M": {0: 1, 1: 2, 2: 3}},
+    )
+
+    call_count = {"n": 0}
+
+    def fake_get(*args, **kwargs):
+        call_count["n"] += 1
+        return _Resp(csv_text)
+
+    monkeypatch.setattr(npower.requests, "get", fake_get)
+
+    # First call: should hit "network" and create cache
+    df1 = npower.fetch_power_hourly(
+        lat=10.0,
+        lon=20.0,
+        start="2022-01-01",
+        end="2022-01-01",
+        parameters="T2M",
+        tz=None,
+        timeout=60,
+    )
+    assert call_count["n"] == 1
+
+    expected_cache = npower._cache_path(10.0, 20.0, "2022-01-01", "2022-01-01", "T2M", None)
+    assert os.path.exists(expected_cache)
+
+    # Second call: should reuse cache (no new network calls)
+    df2 = npower.fetch_power_hourly(
+        lat=10.0,
+        lon=20.0,
+        start="2022-01-01",
+        end="2022-01-01",
+        parameters="T2M",
+        tz=None,
+        timeout=60,
+    )
+    assert call_count["n"] == 1
+
     pd.testing.assert_frame_equal(df1, df2)
-

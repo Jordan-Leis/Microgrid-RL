@@ -1,5 +1,8 @@
 import argparse, os
 from data_sources.nasa_power import fetch_power_hourly
+import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 def main():
     ap = argparse.ArgumentParser()
