@@ -1,63 +1,97 @@
-import argparse, yaml, json
+#!/usr/bin/env python3
+import argparse, json
 from pathlib import Path
-from stable_baselines3 import SAC, A2C
+import numpy as np, pandas as pd
+import torch
+from stable_baselines3 import SAC, A2C, DDPG
+from stable_baselines3.common.base_class import BaseAlgorithm
 from scripts.train_common import build_env
-from scripts.metrics_logger import EpisodeMetricsAccumulator
+
+
+def parse_args():
+   p = argparse.ArgumentParser()
+   p.add_argument("--model", type=str, required=True)
+   p.add_argument("--algo", type=str, choices=["sac", "a2c", "ddpg"], required=True)
+   p.add_argument("--lat", type=float, required=True)
+   p.add_argument("--lon", type=float, required=True)
+   p.add_argument("--days", type=int, default=60) # default 180 in stub?
+   p.add_argument("--cfg", type=str, default="configs/default.yaml")
+   p.add_argument("--episodes", type=int, default=50)
+   p.add_argument("--seed", type=int, default=0)
+   p.add_argument("--out-dir", type=str, required=True)
+   p.add_argument("--deterministic", action="store_true", default=True) # or hardcode True...yes prob don't want stochastic?
+   return p.parse_args()
+
+
+# compute summary
+def compute_summary(df: pd.DataFrame):
+   return {c: {"mean": float(np.nanmean(df[c])), "std": float(np.nanstd(df[c]))}
+           for c in df.columns if c != "episode"}
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('--model', type=str, required=True)
-    ap.add_argument('--algo', type=str, choices=['sac','a2c'], required=True)
-    ap.add_argument('--lat', type=float, required=True)
-    ap.add_argument('--lon', type=float, required=True)
-    ap.add_argument('--days', type=int, default=60)
-    ap.add_argument('--cfg', type=str, default='configs/default.yaml')
-    ap.add_argument('--n_episodes', type=int, default=1, help='Number of evaluation episodes')
-    ap.add_argument('--output', type=str, default=None, help='Output JSON file for results')
-    args = ap.parse_args()
+   args = parse_args()
+   out_dir = Path(args.out_dir)
+   out_dir.mkdir(parents=True, exist_ok=True)
+   np.random.seed(args.seed)
+   torch.manual_seed(args.seed)
 
-    # Load config
-    cfg = yaml.safe_load(open(args.cfg, 'r'))
-    
-    # Build environment
-    env = build_env(args.cfg, args.lat, args.lon, args.days)
-    
-    # Load model
-    model = SAC.load(args.model) if args.algo=='sac' else A2C.load(args.model)
 
-    obs, _ = env.reset()
-    done = False
-    reward = 0.0
-    unmet = 0.0
-    liters = 0.0
-    refuel_cost = 0.0
-    refueled_liters = 0.0
-    total_maintenance_cost = 0.0
-    
-    while not done:
-        act, _ = model.predict(obs, deterministic=True)
-        obs, r, done, _, info = env.step(act)
-        reward += r
-        unmet += info['unmet_kwh']
-        liters += info['liters_used']
-        refuel_cost += info.get('refuel_cost', 0.0)
-        refueled_liters += info.get('refueled_liters', 0.0)
-        total_maintenance_cost += info.get('maintenance_cost', 0.0)
-    
-    # Calculate weekly rates
-    episode_days = args.days
-    weeks = episode_days / 7.0
-    liters_per_week = liters / weeks if weeks > 0 else 0
-    
-    print(f'Episode reward: {reward:.2f}')
-    print(f'Unmet demand (kWh): {unmet:.2f}')
-    print(f'Diesel used (L): {liters:.2f}')
-    print(f'Refuel cost: ${refuel_cost:.2f}')
-    print(f'Refueled liters: {refueled_liters:.2f}')
-    print(f'Total maintenance cost: ${total_maintenance_cost:.2f}')
-    print(f'--- Weekly Rates ---')
-    print(f'Liters per week: {liters_per_week:.1f}')
-    print(f'Maintenance cost per week: ${total_maintenance_cost/weeks:.2f}')
+   env = build_env(args.cfg, args.lat, args.lon, args.days)
 
-if __name__ == '__main__':
-    main()
+
+   if args.algo == "sac":
+       model: BaseAlgorithm = SAC.load(args.model, env=env)
+   elif args.algo == "a2c":
+       model: BaseAlgorithm = A2C.load(args.model, env=env)
+   elif args.algo == "ddpg":
+       model: BaseAlgorithm = DDPG.load(args.model, env=env)
+   else:
+       raise ValueError(f"Unsupported algo {args.algo}")
+
+
+   rows = []
+   for ep in range(args.episodes):
+       obs, info = env.reset(seed=args.seed + ep) # yes?
+       done = False
+
+
+       ep_return = 0.0
+       ep_unmet = 0.0
+       ep_litres = 0.0
+       ep_len = 0
+
+
+       while not done:
+           action, _ = model.predict(obs, deterministic=args.deterministic)
+           obs, reward, terminated, truncated, info = env.step(action)
+           done = bool(terminated or truncated)
+
+
+           ep_return += float(reward)
+           ep_unmet += info.get("unmet_kwh", 0.0)
+           ep_litres += info.get("litres_used", 0.0)
+           ep_len += 1
+
+
+       rows.append({"episode": ep,
+                    "return": ep_return,
+                    "unmet_kwh": ep_unmet,
+                    "litres_used": ep_litres,
+                    "length": ep_len
+                    })
+      
+   # save to CSV
+   df = pd.DataFrame(rows)
+   df.to_csv(out_dir / "episodes.csv", index=False)
+
+
+   # save summary JSON
+   summary = compute_summary(df)
+   (out_dir/"summary.json").write_text(json.dumps(summary, indent=2))
+
+
+   print(f"Saved evaluation results to {out_dir}")
+
+if __name__ == "__main__":
+   main()
+

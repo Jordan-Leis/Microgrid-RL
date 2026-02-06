@@ -1,0 +1,22 @@
+paths:
+  runs_root: "runs"
+  out_dir: "runs/_plots"
+
+schema:
+  episodes_csv: "episodes.csv"
+  summary_json: "summary.json"
+  episode_col: "episode"
+  returns_col: "return"
+
+evaluation:
+  episodes: 50
+  deterministic: true
+
+plotting:
+  smooth_window: 20
+  dpi: 200
+  x_is_index: true
+
+kpis:
+  keys:
+    - "return"
