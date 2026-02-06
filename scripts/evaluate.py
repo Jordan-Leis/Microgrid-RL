@@ -3,7 +3,7 @@ import argparse, json
 from pathlib import Path
 import numpy as np, pandas as pd
 import torch
-from stable_baselines3 import SAC, A2C
+from stable_baselines3 import SAC, A2C, DDPG
 from stable_baselines3.common.base_class import BaseAlgorithm
 from scripts.train_common import build_env
 
@@ -11,7 +11,7 @@ from scripts.train_common import build_env
 def parse_args():
    p = argparse.ArgumentParser()
    p.add_argument("--model", type=str, required=True)
-   p.add_argument("--algo", type=str, choices=["sac", "a2c"], required=True) # add other architectures
+   p.add_argument("--algo", type=str, choices=["sac", "a2c", "ddpg"], required=True)
    p.add_argument("--lat", type=float, required=True)
    p.add_argument("--lon", type=float, required=True)
    p.add_argument("--days", type=int, default=60) # default 180 in stub?
@@ -43,8 +43,10 @@ def main():
        model: BaseAlgorithm = SAC.load(args.model, env=env)
    elif args.algo == "a2c":
        model: BaseAlgorithm = A2C.load(args.model, env=env)
+   elif args.algo == "ddpg":
+       model: BaseAlgorithm = DDPG.load(args.model, env=env)
    else:
-       raise ValueError(f"Unsupported algo {args.algo}") # add other architectures tho
+       raise ValueError(f"Unsupported algo {args.algo}")
 
 
    rows = []
